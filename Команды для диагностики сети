@@ -1,0 +1,184 @@
+Проверь IP-репутацию VPS: curl -s https://ipinfo.io/json | grep org
+Проверь скорость VPS до интернета: speedtest-cli --server 35692
+Проверь скорость ты → VPS: iperf3 -c IP_VPS -R -t 15
+Проверь маршрут: mtr --report youtube.com (ищи потери > 5% на хопах)
+Проверь YouTube Stats for Nerds: смотри Connection Speed и наличие SABR
+Отключи QUIC в браузере и проверь изменилась ли скорость
+
+
+
+2.1 Проверка IP и репутации сервера
+    На VPS (Linux):
+        # Полная информация об IP: страна, провайдер, ASN
+        curl -s https://ipinfo.io/json
+
+        # Только org (ASN провайдера)
+        curl -s https://ipinfo.io/json | grep org
+
+        # Внешний IP сервера
+        curl -s ipv4.icanhazip.com
+
+        # Проверить IPv6
+        curl -s ipv6.icanhazip.com
+
+
+2.2 Speedtest — скорость VPS до интернета
+    Установка и запуск:
+    # Установка
+    apt install speedtest-cli
+
+    # Список серверов в Германии
+    speedtest-cli --list | grep -i germany
+
+    # Тест до конкретного сервера по ID
+    speedtest-cli --server 35692
+
+    # Тест с выводом в JSON
+    speedtest-cli --json | python3 -m json.tool
+
+
+2.3 iperf3 — скорость между тобой и VPS
+    Установка:
+    # Linux (VPS)
+    apt install iperf3
+
+    # Windows (PowerShell)
+    winget install iperf3
+    # или скачать вручную: https://iperf.fr/iperf-download.php
+
+
+    Подготовка VPS — открыть порт и запустить сервер:
+    # Открыть порт в firewall
+    ufw allow 5201/tcp  
+
+    # Запустить iperf3 в фоне
+    iperf3 -s -D
+
+
+    Тесты с Windows (PowerShell):
+    # Скорость VPS -> ты (самый важный тест)
+    iperf3 -c IP_VPS -R -t 15
+
+    # Скорость VPS -> ты, 4 потока (реалистичная нагрузка)
+    iperf3 -c IP_VPS -R -P 4 -t 15
+
+    # Скорость ты -> VPS (upload)
+    iperf3 -c IP_VPS -t 15
+
+    # UDP тест
+    iperf3 -c IP_VPS -R -u -b 100M
+
+
+    Закрыть порт после теста:
+    ufw delete allow 5201/tcp && pkill iperf3
+
+
+    Что смотреть в результатах:
+    Bitrate (receiver) — реальная скорость входящего канала
+    Retr — количество ретрансмиссий. Норма: единицы. Тысячи — потери или переполнение буферов
+    Jitter (при UDP) — джиттер. Норма до 5 мс для стриминга
+
+2.4 Traceroute — маршрут до сервера
+    Linux (VPS):
+    # Установка
+    apt install traceroute
+
+    # Маршрут до YouTube
+    traceroute -n youtube.com
+
+    # Маршрут до Google DNS
+    traceroute -n 8.8.8.8
+
+    # MTR — более наглядно, показывает потери на каждом хопе
+    apt install mtr
+    mtr --report --report-cycles 20 youtube.com
+
+
+    Windows (PowerShell):
+    # Стандартный tracert
+    tracert youtube.com
+
+    # До VPS
+    tracert IP_VPS
+
+
+2.5 Ping и задержки
+    # Linux — пинг до Google
+    ping -c 20 8.8.8.8
+
+    # Пинг до YouTube
+    ping -c 20 youtube.com
+
+    # Windows — пинг до VPS
+    ping -n 20 IP_VPS
+
+    # Непрерывный пинг с меткой времени (Windows)
+    ping -t IP_VPS
+
+
+2.6 Проверка потерь пакетов
+    # MTR — лучший инструмент для проверки потерь на маршруте
+    apt install mtr
+
+    # 100 пакетов до YouTube, отчёт
+    mtr --report --report-cycles 100 youtube.com
+
+    # Интерактивный режим
+    mtr youtube.com
+
+    # С указанием интервала 0.5 сек
+    mtr --interval 0.5 youtube.com
+
+
+2.7 Проверка TCP и BBR
+    # Проверить активный алгоритм управления трафиком
+    sysctl net.ipv4.tcp_congestion_control
+
+    # Проверить qdisc
+    sysctl net.core.default_qdisc
+
+    # Убедиться что BBR активен
+    cat /proc/sys/net/ipv4/tcp_congestion_control
+
+    # Все TCP параметры
+    sysctl -a | grep -i tcp | grep -v '#'
+
+
+2.8 Тест прямой скачки файла через HTTPS
+    Альтернатива iperf3 — не требует открытия дополнительных портов:
+    # На VPS — создать тестовый файл 200 МБ
+    dd if=/dev/urandom bs=1M count=200 | gzip > /var/www/html/test.gz
+
+    # Скачать с VPS на свою машину (Linux)
+    curl -o /dev/null https://ТВОЙ_ДОМЕН/test.gz --progress-bar
+
+    # Скачать и засечь время (Windows PowerShell)
+    Invoke-WebRequest -Uri "https://ТВОЙ_ДОМЕН/test.gz" -OutFile "C:\test.gz"
+
+    # Удалить файл после теста
+    rm /var/www/html/test.gz
+
+
+2.9 Диагностика YouTube (Stats for Nerds)
+    Встроенный инструмент YouTube для проверки качества стриминга:
+    Правой кнопкой на видео → Статистика для гиков
+    Connection Speed — реальная скорость получения видео
+    Buffer Health — запас буфера в секундах. Норма: 20+ сек
+    SABR в поле Codecs — Google применяет адаптацию для датацентровых IP
+    Ideal Resolution vs Current — если занижено, проблема в IP-репутации
+
+2.10 Проверка отключения QUIC (HTTP/3)
+    Отключение QUIC иногда помогает при проблемах со скоростью через прокси:
+    Firefox:
+    # Ввести в адресной строке:
+    about:config
+    # Найти: network.http.http3.enabled
+    # Переключить на: false
+
+
+    Яндекс Браузер / Chromium:
+    # Ввести в адресной строке:
+    browser://flags/#enable-quic
+    # Выбрать: Disabled
+    # Перезапустить браузер
+

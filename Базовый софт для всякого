@@ -1,0 +1,33 @@
+Инструмент
+    Платформа
+        Установка
+            Для чего
+                                        iperf3
+                                            Windows
+                                                winget install iperf3
+                                                    Замер скорости до VPS
+iperf3
+    Linux (VPS)
+        apt install iperf3
+            Сервер для замера
+speedtest-cli
+    Linux (VPS)
+        apt install speedtest-cli
+            Скорость VPS до интернета
+mtr
+    Linux (VPS)
+        apt install mtr
+            Маршрут + потери пакетов
+tracert/traceroute
+    Оба (встроен)
+        Встроен в ОС
+            Маршрут до хоста
+curl
+    Linux (встроен)
+        Встроен в Ubuntu
+            HTTP-тесты, проверка IP
+                                        Invoke-WebRequest
+                                            Windows (встроен)
+                                                Встроен в PowerShell
+                                                    Скачка файлов для теста
+
