@@ -1,0 +1,225 @@
+================================================================
+    ГАЙД: УСТАНОВКА CLOUDFLARE WARP НА VPS
+    Для маршрутизации трафика YouTube/Instagram через Cloudflare IP
+================================================================
+
+ЗАЧЕМ ЭТО НУЖНО
+────────────────
+    Если твой VPS находится в датацентре (например Hostkey, Hetzner, OVH),
+    YouTube и Instagram блокируют или ограничивают соединения по репутации IP.
+    WARP решает это, пропуская трафик к этим сервисам через IP Cloudflare,
+    которые воспринимаются нормально.
+
+    Цепочка без WARP:
+        Ты → VPS (Xray) → Датацентровый IP → YouTube ✗
+
+    Цепочка с WARP:
+        Ты → VPS (Xray) → WARP → Cloudflare IP → YouTube ✓
+
+    ВАЖНО: WARP запускается в режиме прокси (proxy mode).
+    Это означает что он НЕ перехватывает весь трафик сервера,
+    а создаёт локальный SOCKS5-прокси на порту 40000.
+    SSH и всё остальное продолжает работать как обычно.
+
+================================================================
+    ЧАСТЬ 1 — УСТАНОВКА WARP
+================================================================
+
+ШАГ 1. Добавить репозиторий Cloudflare
+────────────────────────────────────────
+    curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --dearmor | tee /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
+
+ШАГ 2. Установить пакет
+────────────────────────
+    apt update && apt install cloudflare-warp -y
+
+ШАГ 3. Запустить демон
+───────────────────────
+    systemctl start warp-svc
+
+    # Проверить что запустился
+    systemctl status warp-svc | head -5
+
+    # Ожидаемый результат: Active: active (running)
+
+ШАГ 4. Зарегистрироваться
+──────────────────────────
+    warp-cli registration new
+
+    # Появится запрос на принятие условий — вводи y
+
+ШАГ 5. ⚠️  КРИТИЧНО — Включить режим прокси ДО подключения
+────────────────────────────────────────────────────────────
+    warp-cli mode proxy
+
+    # Если не включить прокси-режим перед connect —
+    # WARP перехватит весь трафик и SSH оборвётся!
+
+ШАГ 6. Подключиться
+────────────────────
+    warp-cli connect
+
+ШАГ 7. Проверить что WARP работает
+────────────────────────────────────
+    # Проверить статус
+    warp-cli status
+    # Ожидаемый результат: Status update: Connected
+
+    # Проверить что прокси слушает на порту 40000
+    ss -tlnp | grep warp
+    # Ожидаемый результат: 127.0.0.1:40000
+
+    # Проверить что IP стал Cloudflare
+    curl -s --proxy socks5h://127.0.0.1:40000 https://1.1.1.1/cdn-cgi/trace | grep ip
+    # Ожидаемый результат: ip=104.28.x.x (Cloudflare)
+
+================================================================
+    ЧАСТЬ 2 — НАСТРОЙКА XRAY (3x-ui)
+================================================================
+
+    Xray нужно сказать: трафик к YouTube и Instagram
+    отправлять через WARP, а не напрямую.
+    Это делается через добавление outbound и routing правил в конфиг.
+
+ШАГ 8. Сделать резервную копию конфига
+────────────────────────────────────────
+    cp /usr/local/x-ui/bin/config.json /usr/local/x-ui/bin/config.json.backup
+
+ШАГ 9. Добавить outbound и routing через Python
+─────────────────────────────────────────────────
+    python3 << 'EOF'
+    import json
+
+    with open('/usr/local/x-ui/bin/config.json', 'r') as f:
+        config = json.load(f)
+
+    # 1. Добавляем outbound warp
+    warp_outbound = {
+        "tag": "warp",
+        "protocol": "socks",
+        "settings": {
+            "servers": [
+                {
+                    "address": "127.0.0.1",
+                    "port": 40000
+                }
+            ]
+        }
+    }
+    config['outbounds'].append(warp_outbound)
+
+    # 2. Добавляем routing правила для YouTube и Instagram
+    warp_rules = [
+        {
+            "type": "field",
+            "outboundTag": "warp",
+            "domain": [
+                "geosite:youtube",
+                "domain:instagram.com",
+                "domain:cdninstagram.com",
+                "domain:fbcdn.net"
+            ]
+        }
+    ]
+    config['routing']['rules'] = warp_rules + config['routing']['rules']
+
+    # 3. Включаем sniffing на inbound-8443
+    # (нужен чтобы Xray видел домены и мог применять routing)
+    for inbound in config['inbounds']:
+        if inbound.get('tag') == 'inbound-8443':
+            inbound['sniffing'] = {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic", "fakedns"],
+                "metadataOnly": False,
+                "routeOnly": False
+            }
+
+    with open('/usr/local/x-ui/bin/config.json', 'w') as f:
+        json.dump(config, f, indent=2)
+
+    print("Done")
+    EOF
+
+    # Ожидаемый результат: Done
+
+ШАГ 10. Перезапустить x-ui
+────────────────────────────
+    x-ui restart
+
+================================================================
+    ЧАСТЬ 3 — ПРОВЕРКА
+================================================================
+
+    # 1. Проверить что WARP ещё живой после рестарта
+    warp-cli status
+    curl -s --proxy socks5h://127.0.0.1:40000 https://1.1.1.1/cdn-cgi/trace | grep ip
+
+    # 2. На своём устройстве с включённым VPN:
+    #    - Открыть Instagram → лента должна грузиться
+    #    - Открыть YouTube → Stats for Nerds → Connection Speed должна вырасти
+
+================================================================
+    ЧАСТЬ 4 — АВТОЗАПУСК
+================================================================
+
+    WARP демон уже добавлен в автозапуск при установке.
+    Проверить:
+
+    systemctl is-enabled warp-svc
+    # Ожидаемый результат: enabled
+
+    Но после перезагрузки нужно вручную подключиться:
+
+    warp-cli connect
+
+    Чтобы автоматизировать — добавь в crontab:
+
+    crontab -e
+    # Добавь строку:
+    @reboot sleep 10 && warp-cli connect
+
+================================================================
+    ЧАСТЬ 5 — ПОЛЕЗНЫЕ КОМАНДЫ
+================================================================
+
+    # Статус подключения
+    warp-cli status
+
+    # Отключить WARP
+    warp-cli disconnect
+
+    # Подключить WARP
+    warp-cli connect
+
+    # Текущий режим
+    warp-cli mode
+
+    # Проверить порт прокси
+    ss -tlnp | grep warp
+
+    # Тест через WARP
+    curl -s --proxy socks5h://127.0.0.1:40000 https://1.1.1.1/cdn-cgi/trace | grep ip
+
+    # Восстановить конфиг из бэкапа если что-то пошло не так
+    cp /usr/local/x-ui/bin/config.json.backup /usr/local/x-ui/bin/config.json
+    x-ui restart
+
+================================================================
+    ПРИМЕЧАНИЯ
+================================================================
+
+    • WARP не меняет основной IP сервера — curl ipinfo.io
+      всё равно покажет IP хостера. Это нормально.
+      Cloudflare IP используется только для указанных доменов.
+
+    • Если добавляешь новые домены для маршрутизации через WARP —
+      редактируй секцию routing в config.json и перезапускай x-ui.
+
+    • Если inbound называется не inbound-8443 (другой порт) —
+      поменяй тег в скрипте на свой (строка: if inbound.get('tag') == ...)
+
+    • WARP бесплатен для личного использования без регистрации аккаунта.
+
+================================================================
