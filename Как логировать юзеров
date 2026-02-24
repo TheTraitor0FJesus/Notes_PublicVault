@@ -1,0 +1,298 @@
+Входящий запрос → порт 443
+        ↓
+    stream.conf (Nginx)
+        ↓  читает SNI (имя домена в TLS-запросе)
+        ↓
+  1.example.com       ──→ порт 8443 ──→ X-UI ──→ VLESS+REALITY (VPN)
+  2.example.com       ──→ порт 7443 ──→ Nginx ──→ сайт-обложка
+  без домена (default) ─→ порт 8443 ──→ X-UI  ──→ (туда же попадают зонды)
+
+Важно: VLESS+REALITY трафик идёт через stream, а не через HTTP.
+Поэтому в обычном access.log его НЕ видно — нужен отдельный stream лог.
+
+КАК ОТЛИЧИТЬ ЗОНД ОТ РЕАЛЬНОГО ПОЛЬЗОВАТЕЛЯ
+
+┌─────────────────┬──────────────────────────┬───────────────────────────┐
+│ Признак         │ Реальный пользователь    │ Зонд ТСПУ                 │
+├─────────────────┼──────────────────────────┼───────────────────────────┤
+│ SNI             │ Твой домен               │ Пустой или чужой домен    │
+│ sent            │ Мегабайты (>100 000)     │ Байты (<5 000)            │
+│ received        │ Есть данные              │ Почти 0                   │
+│ duration        │ Десятки-сотни секунд     │ Меньше 1-2 секунд         │
+│ Повторы         │ Редкие, с паузами        │ Много подряд, быстро      │
+└─────────────────┴──────────────────────────┴───────────────────────────┘
+
+При появлении [⚠️ UNKNOWN RU] проверить:
+
+1. grep "IP_АДРЕС" /var/log/nginx/stream_access.log
+   → Смотреть на SNI, sent, duration
+
+2. whois IP_АДРЕС | grep -E "netname|descr|OrgName" | head -5
+   → Кому принадлежит IP (оператор, ЦОД, частное лицо)
+
+Если это знакомый человек на новом IP:
+   vpnadd IP_АДРЕС
+
+Если это подозрительно (пустой SNI, маленький трафик, быстрые сессии):
+   → Наблюдать, фиксировать, пока не блокировать
+
+Пример зонда:
+    185.x.x.x  SNI=""  sent=340  received=0  duration=0.3
+    185.x.x.x  SNI=""  sent=512  received=0  duration=0.8
+
+
+//
+// Часть 1
+// НАСТРОЙКА STREAM ЛОГИРОВАНИЯ
+
+Шаг 1 — Открыть stream конфиг
+    nano /etc/nginx/stream-enabled/stream.conf
+Шаг 2 — Добавить две строки в начало файла
+    # Добавить ДО секции map:
+
+    log_format stream_log '$remote_addr [$time_local] '
+                        'SNI="$ssl_preread_server_name" '
+                        'sent=$bytes_sent received=$bytes_received '
+                        'duration=$session_time';
+
+    access_log /var/log/nginx/stream_access.log stream_log;
+
+    # Всё остальное в файле — НЕ ТРОГАТЬ
+Шаг 3 — Проверить и применить
+    nginx -t && systemctl reload nginx
+
+
+    Что появится в логе
+    Каждое подключение будет записано в одну строку:
+
+    IP [24/Feb/2026:19:21:18 +0000] SNI="1.example.com" sent=805269223 received=29023192 duration=1193.950
+
+    Поля:
+        IP            → кто подключился
+        SNI           → на какой домен шёл (пустой = подозрительно)
+        sent          → байт отправлено клиенту
+        received      → байт получено от клиента
+        duration      → секунд длилась сессия
+
+//
+// Часть 2
+// СПИСОК ИЗВЕСТНЫХ IP
+
+Файл с доверенными адресами,помечаем обычных юзеров
+    nano /root/known_ips.txt
+
+    # Добавить по одному IP на строку:
+    IP
+    IP2
+    IP3
+
+    Когда IP у кого-то изменится — просто редактируй этот файл.
+    Скрипты читают его автоматически.
+
+//
+// Часть 3
+// СКРИПТ МОНИТОРИНГА
+
+Создать файл
+    nano /root/watch_ru.sh
+Содержимое скрипта
+
+#!/bin/bash
+
+KNOWN_IPS="/root/known_ips.txt"
+STREAM_LOG="/var/log/nginx/stream_access.log"
+HTTP_LOG="/var/log/nginx/access.log"
+
+is_known() {
+    grep -q "^$1$" "$KNOWN_IPS" 2>/dev/null
+}
+
+echo "================================================"
+echo "  STREAM ЛОГ — все подключения за последние 2 часа"
+echo "  $(date)"
+echo "================================================"
+
+awk -v d="$(date -d '2 hours ago' '+%d/%b/%Y:%H')" \
+    '$2 > "["d {print $1}' "$STREAM_LOG" 2>/dev/null \
+    | sort | uniq -c | sort -rn \
+    | while read count ip; do
+        country=$(geoiplookup "$ip" 2>/dev/null | awk -F': ' '{print $2}')
+        if is_known "$ip"; then
+            tag="[FRIEND]      "
+        elif echo "$country" | grep -q "Russian Federation"; then
+            tag="[⚠️ UNKNOWN RU]"
+        else
+            tag="[FOREIGN]     "
+        fi
+        echo "$tag $count подкл. | $ip | $country"
+    done
+
+echo ""
+echo "================================================"
+echo "  ПОДОЗРИТЕЛЬНЫЕ — пустой или чужой SNI"
+echo "================================================"
+
+grep -E 'SNI="("|[^a-z])' "$STREAM_LOG" 2>/dev/null \
+    | awk '{print $1}' | sort | uniq -c | sort -rn \
+    | head -20 \
+    | while read count ip; do
+        country=$(geoiplookup "$ip" 2>/dev/null | awk -F': ' '{print $2}')
+        if is_known "$ip"; then
+            tag="[FRIEND]"
+        elif echo "$country" | grep -q "Russian Federation"; then
+            tag="[⚠️ UNKNOWN RU]"
+        else
+            tag="[FOREIGN]"
+        fi
+        echo "$tag $count раз | $ip | $country"
+    done
+
+Сделать исполняемым
+    chmod +x /root/watch_ru.sh
+
+//
+// Часть 4
+// АЛИАСЫ
+
+┌──────────────────────────┬────────────────────────────────────────┐
+│ Команда                  │ Что делает                             │
+├──────────────────────────┼────────────────────────────────────────┤
+│ vpnstat                  │ Полный отчёт за последние 2 часа       │
+│ vpnlive                  │ Живой поток всех подключений           │
+│ vpnru                    │ Только неизвестные (без друзей)        │
+│ vpnwho                   │ Кто подключён прямо сейчас             │
+│ vpn2weeks                │ Сводка за все 2 недели                 │
+│ vpnday 2026-02-20        │ История за конкретный день             │
+│ vpnadd 1.2.3.4           │ Добавить IP друга в белый список       │
+│ vpnfriends               │ Показать всех известных                │
+│ vpnarchive               │ Список доступных архивов               │
+│ vpnhistory               │ История ежедневных отчётов             │
+│ ipcheck 1.2.3.4          │ Узнать страну IP                       │
+└──────────────────────────┴────────────────────────────────────────┘
+
+Создать файл
+    nano ~/.bash_aliases
+Содержимое
+# === VPN МОНИТОРИНГ ===
+
+# Полный отчёт за 2 часа
+alias vpnstat='/root/watch_ru.sh'
+
+# Живой поток порта 443 (Ctrl+C чтобы остановить)
+alias vpnlive='tail -f /var/log/nginx/stream_access.log'
+
+# Только неизвестные российские IP в реальном времени
+alias vpnru='tail -f /var/log/nginx/stream_access.log | grep --line-buffered -v -f /root/known_ips.txt'
+
+# Кто подключён прямо сейчас (активные сессии)
+alias vpnwho='ss -tnp | grep -E "8443|7443|9443"'
+
+# История мониторинга по дням
+alias vpnhistory='cat /root/ru_monitor_history.log'
+
+# Все подключения за 2 недели (из всех архивов)
+vpn2weeks() {
+    echo "=== Все подключения за последние 2 недели ==="
+    for f in /var/log/nginx/stream_access.log \
+              /var/log/nginx/stream_access.log.*; do
+        if [[ "$f" == *.gz ]]; then
+            zcat "$f" 2>/dev/null
+        else
+            cat "$f" 2>/dev/null
+        fi
+    done | awk '{print $1}' | sort | uniq -c | sort -rn \
+    | while read count ip; do
+        country=$(geoiplookup "$ip" 2>/dev/null | awk -F': ' '{print $2}')
+        if grep -q "^$ip$" /root/known_ips.txt 2>/dev/null; then
+            tag="[FRIEND]      "
+        elif echo "$country" | grep -q "Russian Federation"; then
+            tag="[⚠️ UNKNOWN RU]"
+        else
+            tag="[FOREIGN]     "
+        fi
+        echo "$tag $count подкл. | $ip | $country"
+    done
+}
+
+# История за конкретную дату (пример: vpnday 2026-02-20)
+vpnday() {
+    local date_str=$(date -d "$1" '+%d/%b/%Y' 2>/dev/null)
+    if [ -z "$date_str" ]; then
+        echo "Формат даты: vpnday 2026-02-20"
+        return 1
+    fi
+    echo "=== Подключения за $1 ==="
+    for f in /var/log/nginx/stream_access.log \
+              /var/log/nginx/stream_access.log.*; do
+        if [[ "$f" == *.gz ]]; then
+            zgrep "$date_str" "$f" 2>/dev/null
+        else
+            grep "$date_str" "$f" 2>/dev/null
+        fi
+    done | awk '{print $1}' | sort | uniq -c | sort -rn \
+    | while read count ip; do
+        country=$(geoiplookup "$ip" 2>/dev/null | awk -F': ' '{print $2}')
+        if grep -q "^$ip$" /root/known_ips.txt 2>/dev/null; then
+            tag="[FRIEND]      "
+        elif echo "$country" | grep -q "Russian Federation"; then
+            tag="[⚠️ UNKNOWN RU]"
+        else
+            tag="[FOREIGN]     "
+        fi
+        echo "$tag $count подкл. | $ip | $country"
+    done
+}
+
+# Добавить новый IP друга в список
+vpnadd() { echo "$1" >> /root/known_ips.txt && echo "Добавлен: $1"; }
+
+# Посмотреть список друзей
+alias vpnfriends='cat /root/known_ips.txt'
+
+# Список архивных логов
+alias vpnarchive='ls -lh /var/log/nginx/stream_access.log*'
+
+# Быстро узнать страну любого IP
+alias ipcheck='geoiplookup'
+
+Применить без перезапуска сессии
+    source ~/.bash_aliases
+
+//
+// Часть 5
+// АВТОМАТИЧЕСКАЯ ИСТОРИЯ
+
+Открыть планировщик задач
+    crontab -e
+    # При первом запуске — выбрать 1 (nano)
+Добавить в конец файла
+    0 23 * * * /root/watch_ru.sh >> /root/ru_monitor_history.log 2>&1
+
+    Расшифровка:
+        0    → в 0 минут
+        23   → в 23 часа
+        * * *→ каждый день
+        >>   → дописывать (не перезаписывать)
+Проверить что задача сохранилась
+    crontab -l
+Проверить работу вручную (не ждать 23:00)
+    /root/watch_ru.sh >> /root/ru_monitor_history.log 2>&1
+    cat /root/ru_monitor_history.log
+
+//
+// Часть 6
+// ХРАНЕНИЕ ЛОГОВ
+
+Система logrotate уже настроена по умолчанию в скрипте https://scarce-hole-1e2.notion.site/3X-UI-pro-with-REALITY-panel-and-inbounds-3X-UI-pro-with-REALITY-panel-and-inbounds-on-port-443-on-10d1666462e48085be0fee4c136ce417
+Маска /var/log/nginx/*.log покрывает stream_access.log автоматически.
+
+Текущие настройки (/etc/logrotate.d/nginx):
+	• Ротация — ежедневно
+	• Хранение — 14 дней (rotate 14)
+	• Сжатие — включено (.gz архивы)
+
+Чтобы увеличить срок хранения:
+	nano /etc/logrotate.d/nginx
+	# Найти строку "rotate 14" и изменить цифру:
+	rotate 30   → месяц
+	rotate 90   → три месяца
