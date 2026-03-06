@@ -1,71 +1,152 @@
-$report = "$env:USERPROFILE\Desktop\system_audit.txt"
+$report = [ordered]@{}
 
-"===== INSTALLED PROGRAMS (Registry) =====" | Out-File $report
+function Clean-Names($items) {
+    $items |
+    Where-Object {$_} |
+    ForEach-Object {
+        ($_ -replace '[^\p{L}\p{N}\s\.\-\+\#\(\)]','').Trim()
+    } |
+    Where-Object {$_ -ne ""} |
+    Sort-Object -Unique
+}
 
-Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* ,
-HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* ,
-HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* |
-Select-Object -ExpandProperty DisplayName -ErrorAction SilentlyContinue |
-Sort-Object -Unique |
-Out-File $report -Append
+# ------------------------------------------------
+# INSTALLED PROGRAMS (registry)
+# ------------------------------------------------
+$registryPaths = @(
+"HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+"HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+"HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+)
 
-"`n===== MICROSOFT STORE APPS =====" | Out-File $report -Append
-Get-AppxPackage | Select-Object -ExpandProperty Name |
-Sort-Object -Unique |
-Out-File $report -Append
+$registryApps = foreach ($path in $registryPaths) {
+Get-ItemProperty $path -ErrorAction SilentlyContinue |
+Select-Object -ExpandProperty DisplayName -ErrorAction SilentlyContinue
+}
 
-"`n===== WINGET PACKAGES =====" | Out-File $report -Append
-winget list | Select-Object -Skip 1 |
-ForEach-Object { ($_ -split '\s{2,}')[0] } |
-Sort-Object -Unique |
-Out-File $report -Append
+$report.registry_programs = Clean-Names $registryApps
 
-"`n===== PROGRAM FILES DIRECTORIES =====" | Out-File $report -Append
-Get-ChildItem "C:\Program Files","C:\Program Files (x86)" -Directory |
-Select-Object -ExpandProperty Name |
-Sort-Object -Unique |
-Out-File $report -Append
+# ------------------------------------------------
+# MICROSOFT STORE
+# ------------------------------------------------
+$store = Get-AppxPackage |
+Select-Object -ExpandProperty Name
 
-"`n===== PYTHON PACKAGES =====" | Out-File $report -Append
-pip list 2>$null |
-Select-Object -Skip 2 |
-ForEach-Object { ($_ -split '\s+')[0] } |
-Out-File $report -Append
+$report.microsoft_store = Clean-Names $store
 
-"`n===== NODE GLOBAL PACKAGES =====" | Out-File $report -Append
-npm list -g --depth=0 2>$null |
+# ------------------------------------------------
+# WINGET
+# ------------------------------------------------
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+
+$winget = winget list |
 Select-Object -Skip 1 |
-ForEach-Object { ($_ -replace '.* ', '') } |
-Out-File $report -Append
+ForEach-Object { ($_ -split '\s{2,}')[0] }
 
-"`n===== RUST CARGO PACKAGES =====" | Out-File $report -Append
-cargo install --list 2>$null |
-ForEach-Object { ($_ -split ' ')[0] } |
-Out-File $report -Append
+$report.winget = Clean-Names $winget
+}
 
-"`n===== .NET GLOBAL TOOLS =====" | Out-File $report -Append
-dotnet tool list -g 2>$null |
+# ------------------------------------------------
+# PROGRAM FILES (portable apps detection)
+# ------------------------------------------------
+$dirs = Get-ChildItem "C:\Program Files","C:\Program Files (x86)" -Directory |
+Select-Object -ExpandProperty Name
+
+$report.program_files_dirs = Clean-Names $dirs
+
+# ------------------------------------------------
+# PYTHON
+# ------------------------------------------------
+if (Get-Command pip -ErrorAction SilentlyContinue) {
+
+$py = pip list |
 Select-Object -Skip 2 |
-ForEach-Object { ($_ -split '\s+')[0] } |
-Out-File $report -Append
+ForEach-Object { ($_ -split '\s+')[0] }
 
-"`n===== DOCKER CONTAINERS =====" | Out-File $report -Append
-docker ps -a --format "{{.Names}}" 2>$null |
-Out-File $report -Append
+$report.python_packages = Clean-Names $py
+}
 
-"`n===== DOCKER IMAGES =====" | Out-File $report -Append
-docker images --format "{{.Repository}}" 2>$null |
-Out-File $report -Append
+# ------------------------------------------------
+# NODE
+# ------------------------------------------------
+if (Get-Command npm -ErrorAction SilentlyContinue) {
 
-"`n===== VSCODE EXTENSIONS =====" | Out-File $report -Append
-code --list-extensions 2>$null |
-Out-File $report -Append
+$node = npm list -g --depth=0 |
+Select-Object -Skip 1 |
+ForEach-Object { ($_ -replace '.* ', '') }
 
-"`n===== STARTUP PROGRAMS =====" | Out-File $report -Append
-Get-CimInstance Win32_StartupCommand |
-Select-Object -ExpandProperty Name |
-Out-File $report -Append
+$report.node_packages = Clean-Names $node
+}
 
-"`n===== GIT CONFIG =====" | Out-File $report -Append
-git config --list 2>$null |
-Out-File $report -Append
+# ------------------------------------------------
+# RUST
+# ------------------------------------------------
+if (Get-Command cargo -ErrorAction SilentlyContinue) {
+
+$cargo = cargo install --list |
+ForEach-Object { ($_ -split ' ')[0] }
+
+$report.cargo_packages = Clean-Names $cargo
+}
+
+# ------------------------------------------------
+# DOTNET TOOLS
+# ------------------------------------------------
+if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+
+$dotnet = dotnet tool list -g |
+Select-Object -Skip 2 |
+ForEach-Object { ($_ -split '\s+')[0] }
+
+$report.dotnet_tools = Clean-Names $dotnet
+}
+
+# ------------------------------------------------
+# DOCKER
+# ------------------------------------------------
+if (Get-Command docker -ErrorAction SilentlyContinue) {
+
+$containers = docker ps -a --format "{{.Names}}"
+$images = docker images --format "{{.Repository}}"
+
+$report.docker_containers = Clean-Names $containers
+$report.docker_images = Clean-Names $images
+}
+
+# ------------------------------------------------
+# VSCODE
+# ------------------------------------------------
+if (Get-Command code -ErrorAction SilentlyContinue) {
+
+$vscode = code --list-extensions
+
+$report.vscode_extensions = Clean-Names $vscode
+}
+
+# ------------------------------------------------
+# STARTUP
+# ------------------------------------------------
+$startup = Get-CimInstance Win32_StartupCommand |
+Select-Object -ExpandProperty Name
+
+$report.startup_programs = Clean-Names $startup
+
+# ------------------------------------------------
+# GIT CONFIG
+# ------------------------------------------------
+if (Get-Command git -ErrorAction SilentlyContinue) {
+
+$git = git config --list
+
+$report.git_config = $git
+}
+
+# ------------------------------------------------
+# SAVE JSON
+# ------------------------------------------------
+$path = "$env:USERPROFILE\Desktop\system_audit_clean.json"
+
+$report | ConvertTo-Json -Depth 5 |
+Out-File $path -Encoding utf8
+
+Write-Host "Audit saved to:" $path
