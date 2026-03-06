@@ -1,0 +1,71 @@
+$report = "$env:USERPROFILE\Desktop\system_audit.txt"
+
+"===== INSTALLED PROGRAMS (Registry) =====" | Out-File $report
+
+Get-ItemProperty HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* ,
+HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* ,
+HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\* |
+Select-Object -ExpandProperty DisplayName -ErrorAction SilentlyContinue |
+Sort-Object -Unique |
+Out-File $report -Append
+
+"`n===== MICROSOFT STORE APPS =====" | Out-File $report -Append
+Get-AppxPackage | Select-Object -ExpandProperty Name |
+Sort-Object -Unique |
+Out-File $report -Append
+
+"`n===== WINGET PACKAGES =====" | Out-File $report -Append
+winget list | Select-Object -Skip 1 |
+ForEach-Object { ($_ -split '\s{2,}')[0] } |
+Sort-Object -Unique |
+Out-File $report -Append
+
+"`n===== PROGRAM FILES DIRECTORIES =====" | Out-File $report -Append
+Get-ChildItem "C:\Program Files","C:\Program Files (x86)" -Directory |
+Select-Object -ExpandProperty Name |
+Sort-Object -Unique |
+Out-File $report -Append
+
+"`n===== PYTHON PACKAGES =====" | Out-File $report -Append
+pip list 2>$null |
+Select-Object -Skip 2 |
+ForEach-Object { ($_ -split '\s+')[0] } |
+Out-File $report -Append
+
+"`n===== NODE GLOBAL PACKAGES =====" | Out-File $report -Append
+npm list -g --depth=0 2>$null |
+Select-Object -Skip 1 |
+ForEach-Object { ($_ -replace '.* ', '') } |
+Out-File $report -Append
+
+"`n===== RUST CARGO PACKAGES =====" | Out-File $report -Append
+cargo install --list 2>$null |
+ForEach-Object { ($_ -split ' ')[0] } |
+Out-File $report -Append
+
+"`n===== .NET GLOBAL TOOLS =====" | Out-File $report -Append
+dotnet tool list -g 2>$null |
+Select-Object -Skip 2 |
+ForEach-Object { ($_ -split '\s+')[0] } |
+Out-File $report -Append
+
+"`n===== DOCKER CONTAINERS =====" | Out-File $report -Append
+docker ps -a --format "{{.Names}}" 2>$null |
+Out-File $report -Append
+
+"`n===== DOCKER IMAGES =====" | Out-File $report -Append
+docker images --format "{{.Repository}}" 2>$null |
+Out-File $report -Append
+
+"`n===== VSCODE EXTENSIONS =====" | Out-File $report -Append
+code --list-extensions 2>$null |
+Out-File $report -Append
+
+"`n===== STARTUP PROGRAMS =====" | Out-File $report -Append
+Get-CimInstance Win32_StartupCommand |
+Select-Object -ExpandProperty Name |
+Out-File $report -Append
+
+"`n===== GIT CONFIG =====" | Out-File $report -Append
+git config --list 2>$null |
+Out-File $report -Append
